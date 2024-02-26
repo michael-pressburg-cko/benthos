@@ -30,6 +30,7 @@ const (
 
 	// Kinesis Input Fields
 	kiFieldDynamoDB        = "dynamodb"
+	kiFieldEnhancedFanout  = "enhanced_fanout"
 	kiFieldStreams         = "streams"
 	kiFieldCheckpointLimit = "checkpoint_limit"
 	kiFieldCommitPeriod    = "commit_period"
@@ -37,6 +38,9 @@ const (
 	kiFieldRebalancePeriod = "rebalance_period"
 	kiFieldStartFromOldest = "start_from_oldest"
 	kiFieldBatching        = "batching"
+
+	// Kinesis Enhanced Fanout Fields
+	kiFieldConsumerName = "consumer_name"
 )
 
 type kiConfig struct {
@@ -47,6 +51,7 @@ type kiConfig struct {
 	LeasePeriod     string
 	RebalancePeriod string
 	StartFromOldest bool
+	EFOConsumerName string
 }
 
 func kinesisInputConfigFromParsed(pConf *service.ParsedConfig) (conf kiConfig, err error) {
@@ -57,6 +62,15 @@ func kinesisInputConfigFromParsed(pConf *service.ParsedConfig) (conf kiConfig, e
 		if conf.DynamoDB, err = kinesisInputDynamoDBConfigFromParsed(pConf.Namespace(kiFieldDynamoDB)); err != nil {
 			return
 		}
+	}
+	if pConf.Contains(kiFieldEnhancedFanout) {
+		if v, parseErr := pConf.FieldStringMap(kiFieldEnhancedFanout); parseErr != nil {
+			if _, ok := v[kiFieldConsumerName]; !ok {
+				err = parseErr
+				return
+			}
+		}
+
 	}
 	if conf.CheckpointLimit, err = pConf.FieldInt(kiFieldCheckpointLimit); err != nil {
 		return
@@ -102,6 +116,11 @@ Use the `+"`batching`"+` fields to configure an optional [batching policy](/docs
 		service.NewStringListField(kiFieldStreams).
 			Description("One or more Kinesis data streams to consume from. Streams can either be specified by their name or full ARN. Shards of a stream are automatically balanced across consumers by coordinating through the provided DynamoDB table. Multiple comma separated streams can be listed in a single element. Shards are automatically distributed across consumers of a stream by coordinating through the provided DynamoDB table. Alternatively, it's possible to specify an explicit shard to consume from with a colon after the stream name, e.g. `foo:0` would consume the shard `0` of the stream `foo`.").
 			Examples([]any{"foo", "arn:aws:kinesis:*:111122223333:stream/my-stream"}),
+		service.NewObjectField(kiFieldEnhancedFanout,
+			service.NewStringField(kiFieldConsumerName).
+				Description("The name of consumer.").
+				Default("")).
+			Description("Determines whether to ingest from Kinesis stream where Enhanced Fanout is enabled."),
 		service.NewObjectField(kiFieldDynamoDB,
 			service.NewStringField(kiddbFieldTable).
 				Description("The name of the table to access.").
@@ -689,7 +708,11 @@ func (k *kinesisReader) runBalancedShards() {
 						continue
 					}
 					wg.Add(1)
-					if err = k.runConsumer(&wg, *info, shardID, sequence); err != nil {
+					if k.conf.EFOConsumerName != "" {
+						if err = k.runEfoConsumer(&wg, *info, shardID, sequence); err != nil {
+							k.log.Errorf("Failed to start consumer with Enhanced Fanout enabled: %v\n", err)
+						}
+					} else if err = k.runConsumer(&wg, *info, shardID, sequence); err != nil {
 						k.log.Errorf("Failed to start consumer: %v\n", err)
 					}
 				}
@@ -738,7 +761,11 @@ func (k *kinesisReader) runBalancedShards() {
 						info.id, randomShard, clientID, k.clientID,
 					)
 					wg.Add(1)
-					if err = k.runConsumer(&wg, *info, randomShard, sequence); err != nil {
+					if k.conf.EFOConsumerName != "" {
+						if err = k.runEfoConsumer(&wg, *info, randomShard, sequence); err != nil {
+							k.log.Errorf("Failed to start consumer with Enhanced Fanout enabled: %v\n", err)
+						}
+					} else if err = k.runConsumer(&wg, *info, randomShard, sequence); err != nil {
 						k.log.Errorf("Failed to start consumer: %v\n", err)
 					} else {
 						// If we successfully stole the shard then that's enough
@@ -779,7 +806,11 @@ func (k *kinesisReader) runExplicitShards() {
 				sequence, err := k.checkpointer.Claim(k.ctx, id, shardID, "")
 				if err == nil {
 					wg.Add(1)
-					err = k.runConsumer(&wg, info, shardID, sequence)
+					if k.conf.EFOConsumerName != "" {
+						err = k.runEfoConsumer(&wg, info, shardID, sequence)
+					} else {
+						err = k.runConsumer(&wg, info, shardID, sequence)
+					}
 				}
 				if err != nil {
 					if k.ctx.Err() != nil {
@@ -843,6 +874,7 @@ func (k *kinesisReader) Connect(ctx context.Context) error {
 		return nil
 	}
 
+	k.sess.BaseEndpoint = aws.String("http://localhost")
 	svc := kinesis.NewFromConfig(k.sess)
 	checkpointer, err := newAWSKinesisCheckpointer(k.sess, k.clientID, k.conf.DynamoDB, k.leasePeriod, k.commitPeriod)
 	if err != nil {
