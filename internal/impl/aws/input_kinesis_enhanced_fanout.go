@@ -22,24 +22,37 @@ func NewEfoConsumer(consumerName string) *efoConsumer {
 }
 
 func (k *kinesisReader) registerEfoConsumer(ctx context.Context, info streamInfo, consumerName string) (*string, error) {
-	streamOutput, err := k.svc.RegisterStreamConsumer(ctx, &kinesis.RegisterStreamConsumerInput{
+	res, err := k.svc.DescribeStreamConsumer(ctx, &kinesis.DescribeStreamConsumerInput{
 		ConsumerName: &consumerName,
 		StreamARN:    &info.arn,
 	})
+	var consumer *string
+	// if the consumer isnt already registered, register it
+	if err != nil || res.ConsumerDescription == nil {
+		streamOutput, err := k.svc.RegisterStreamConsumer(ctx, &kinesis.RegisterStreamConsumerInput{
+			ConsumerName: &consumerName,
+			StreamARN:    &info.arn,
+		})
 
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+
+		if streamOutput.Consumer == nil {
+			return nil, errors.New("failed to register consumer - RegisterStreamConsumer returned nil")
+		}
+
+		consumer = streamOutput.Consumer.ConsumerARN
+	} else {
+		consumer = res.ConsumerDescription.ConsumerARN
 	}
 
-	if streamOutput.Consumer == nil {
-		return nil, errors.New("failed to register consumer - RegisterStreamConsumer returned nil")
-	}
-
-	return streamOutput.Consumer.ConsumerARN, nil
+	return consumer, nil
 }
 
 func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shardID, startingSequence string) (initErr error) {
 	//register consumer
+	k.log.Info("hitting efo consumer")
 	consumerARN, err := k.registerEfoConsumer(k.ctx, info, k.conf.EFOConsumerName)
 	if err != nil {
 		return err
@@ -57,21 +70,29 @@ func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shar
 	if err != nil {
 		return err
 	}
-	pendingChan := make(chan []types.Record, 10)
+	pendingChan := make(chan []types.Record)
 
 	go func() {
 		for {
 			select {
 			case <-k.ctx.Done():
+				k.log.Info("closing efo stream")
 				subOutput.GetStream().Close()
 				close(pendingChan)
+				k.log.Info("closed efo stream")
 				return
 
 			case ev := <-subOutput.GetStream().Events():
 				if event, ok := ev.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent); !ok {
-					k.log.Errorf("Received unexpected event type: %T", ev)
+					if ev == nil {
+						k.log.Infof("nil evt")
+						continue
+					}
+					k.log.Errorf("Received unexpected non nil event type: %T", ev)
 				} else {
-					pendingChan <- event.Value.Records
+					if len(event.Value.Records) > 0 {
+						pendingChan <- event.Value.Records
+					}
 				}
 			}
 		}
@@ -131,6 +152,7 @@ func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shar
 			reason := ""
 			switch state {
 			case awsKinesisConsumerFinished:
+				k.log.Info("kinesis marked as closed")
 				reason = " because the shard is closed"
 				if err := k.checkpointer.Delete(k.ctx, info.id, shardID); err != nil {
 					k.log.Errorf("Failed to remove checkpoint for finished stream '%v' shard '%v': %v", info.id, shardID, err)
@@ -164,19 +186,22 @@ func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shar
 
 		for {
 			var err error
-			// TODO CHANGE HERE
-			p, ok := <-pendingChan
-			if !ok {
-				state = awsKinesisConsumerFinished
-			} else {
-				pending = p
-			}
+			// Recieve on the channel being populated by the EFO Stream we've subscribed to.
+			// If its closed, then assume the consumer is finished
 
 			if state == awsKinesisConsumerConsuming && len(pending) == 0 && nextPullChan == unblockedChan {
 				// The getRecords method ensures that it returns the input
 				// iterator whenever it errors out. Therefore, regardless of the
 				// outcome of the call if iter is now empty we have definitely
 				// reached the end of the shard.
+				p, ok := <-pendingChan
+				if !ok {
+					state = awsKinesisConsumerFinished
+				} else {
+					if len(p) > 0 {
+						pending = p
+					}
+				}
 
 			} else {
 				unblockPullChan()
@@ -197,6 +222,7 @@ func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shar
 					var i int
 					var r types.Record
 					for i, r = range pending {
+						k.log.Infof("adding record to batcher %v", string(r.Data))
 						if recordBatcher.AddRecord(r) {
 							if pendingMsg, err = recordBatcher.FlushMessage(commitCtx); err != nil {
 								k.log.Errorf("Failed to dispatch message due to checkpoint error: %v\n", err)
@@ -219,8 +245,12 @@ func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shar
 			}
 
 			if nextTimedBatchChan == nil {
+				k.log.Infof("no timed batcher chan")
 				if tNext, exists := recordBatcher.UntilNext(); exists {
 					nextTimedBatchChan = time.After(tNext)
+					k.log.Infof("new timed chan %v", tNext)
+				} else {
+					k.log.Infof("no timed batcher exists")
 				}
 			}
 

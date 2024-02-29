@@ -40,7 +40,7 @@ const (
 	kiFieldBatching        = "batching"
 
 	// Kinesis Enhanced Fanout Fields
-	kiFieldConsumerName = "consumer_name"
+	kiefoFieldConsumerName = "consumer_name"
 )
 
 type kiConfig struct {
@@ -64,11 +64,15 @@ func kinesisInputConfigFromParsed(pConf *service.ParsedConfig) (conf kiConfig, e
 		}
 	}
 	if pConf.Contains(kiFieldEnhancedFanout) {
-		if v, parseErr := pConf.FieldStringMap(kiFieldEnhancedFanout); parseErr != nil {
-			if _, ok := v[kiFieldConsumerName]; !ok {
+		if v, parseErr := pConf.FieldStringMap(kiFieldEnhancedFanout); parseErr == nil {
+			if _, ok := v[kiefoFieldConsumerName]; !ok {
 				err = parseErr
 				return
 			}
+			conf.EFOConsumerName = v[kiefoFieldConsumerName]
+		} else {
+			err = parseErr
+			return
 		}
 	}
 	if conf.CheckpointLimit, err = pConf.FieldInt(kiFieldCheckpointLimit); err != nil {
@@ -116,7 +120,7 @@ Use the `+"`batching`"+` fields to configure an optional [batching policy](/docs
 			Description("One or more Kinesis data streams to consume from. Streams can either be specified by their name or full ARN. Shards of a stream are automatically balanced across consumers by coordinating through the provided DynamoDB table. Multiple comma separated streams can be listed in a single element. Shards are automatically distributed across consumers of a stream by coordinating through the provided DynamoDB table. Alternatively, it's possible to specify an explicit shard to consume from with a colon after the stream name, e.g. `foo:0` would consume the shard `0` of the stream `foo`.").
 			Examples([]any{"foo", "arn:aws:kinesis:*:111122223333:stream/my-stream"}),
 		service.NewObjectField(kiFieldEnhancedFanout,
-			service.NewStringField(kiFieldConsumerName).
+			service.NewStringField(kiefoFieldConsumerName).
 				Description("The name of consumer.").
 				Default("")).
 			Description("Determines whether to ingest from Kinesis stream where Enhanced Fanout is enabled."),
@@ -873,7 +877,8 @@ func (k *kinesisReader) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	k.sess.BaseEndpoint = aws.String("http://localhost")
+	k.sess.BaseEndpoint = aws.String("http://0.0.0.0:4566")
+	k.sess.Region = "us-east-1"
 	svc := kinesis.NewFromConfig(k.sess)
 	checkpointer, err := newAWSKinesisCheckpointer(k.sess, k.clientID, k.conf.DynamoDB, k.leasePeriod, k.commitPeriod)
 	if err != nil {
