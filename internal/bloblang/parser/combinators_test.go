@@ -184,7 +184,7 @@ func TestNotInSet(t *testing.T) {
 }
 
 func TestEmptyLine(t *testing.T) {
-	parser := EmptyLine()
+	parser := EmptyLine
 
 	tests := map[string]struct {
 		input     string
@@ -439,7 +439,7 @@ func TestBestMatch(t *testing.T) {
 }
 
 func TestSnakeCase(t *testing.T) {
-	parser := SnakeCase()
+	parser := SnakeCase
 
 	tests := map[string]struct {
 		input     string
@@ -724,7 +724,7 @@ func TestAllOf(t *testing.T) {
 }
 
 func TestDelimited(t *testing.T) {
-	parser := Delimited(Term("abc"), Char('#'))
+	parser := Delimited(Term("abc"), charHash)
 
 	tests := map[string]struct {
 		input     string
@@ -778,72 +778,8 @@ func TestDelimited(t *testing.T) {
 	}
 }
 
-func TestDelimitedPattern(t *testing.T) {
-	parser := DelimitedPattern(Char('#'), Term("abc"), Char(','), Char('!'), false)
-
-	tests := map[string]struct {
-		input     string
-		result    any
-		remaining string
-		err       *Error
-	}{
-		"empty input": {
-			err: NewError([]rune(""), "#"),
-		},
-		"no start": {
-			input:     "ab",
-			remaining: "ab",
-			err:       NewError([]rune("ab"), "#"),
-		},
-		"smaller than string": {
-			input:     "#ab",
-			remaining: "#ab",
-			err:       NewError([]rune("ab"), "abc"),
-		},
-		"matches first": {
-			input:     "#abc!No",
-			remaining: "No",
-			result:    []any{"abc"},
-		},
-		"matches some of second": {
-			input:     "#abc,abNo",
-			remaining: "#abc,abNo",
-			err:       NewError([]rune("abNo"), "abc"),
-		},
-		"matches not stopped": {
-			input:     "#abc,abcNo",
-			remaining: "#abc,abcNo",
-			err:       NewError([]rune("No"), ",", "!"),
-		},
-		"matches all": {
-			input:     "#abc,abc!",
-			remaining: "",
-			result:    []any{"abc", "abc"},
-		},
-		"matches some": {
-			input:     "#abc,abc! and this",
-			remaining: " and this",
-			result:    []any{"abc", "abc"},
-		},
-		"matches all of these": {
-			input:     "#abc,abc,abc,abc!def and this",
-			remaining: "def and this",
-			result:    []any{"abc", "abc", "abc", "abc"},
-		},
-	}
-
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			res := parser([]rune(test.input))
-			require.Equal(t, test.err, res.Err, "Error")
-			assert.Equal(t, test.result, res.Payload, "Result")
-			assert.Equal(t, test.remaining, string(res.Remaining), "Remaining")
-		})
-	}
-}
-
 func TestDelimitedPatternAllowTrailing(t *testing.T) {
-	parser := DelimitedPattern(Char('#'), Term("abc"), Char(','), Char('!'), true)
+	parser := DelimitedPattern(charHash, Term("abc"), charComma, Char('!'))
 
 	tests := map[string]struct {
 		input     string
@@ -1245,7 +1181,7 @@ func TestOptional(t *testing.T) {
 }
 
 func TestNumber(t *testing.T) {
-	p := Number()
+	p := Number
 
 	tests := map[string]struct {
 		input     string
@@ -1299,7 +1235,7 @@ func TestNumber(t *testing.T) {
 }
 
 func TestBoolean(t *testing.T) {
-	p := Boolean()
+	p := Boolean
 
 	tests := map[string]struct {
 		input     string
@@ -1348,7 +1284,7 @@ func TestBoolean(t *testing.T) {
 }
 
 func TestQuotedString(t *testing.T) {
-	str := QuotedString()
+	str := QuotedString
 
 	tests := map[string]struct {
 		input     string
@@ -1402,7 +1338,7 @@ func TestQuotedString(t *testing.T) {
 }
 
 func TestQuotedMultilineString(t *testing.T) {
-	str := TripleQuoteString()
+	str := TripleQuoteString
 
 	tests := map[string]struct {
 		input     string
@@ -1657,7 +1593,7 @@ func TestObject(t *testing.T) {
 }
 
 func TestSpacesAndTabs(t *testing.T) {
-	inSet := SpacesAndTabs()
+	inSet := SpacesAndTabs
 
 	tests := map[string]struct {
 		input     string
@@ -1706,7 +1642,7 @@ func TestSpacesAndTabs(t *testing.T) {
 }
 
 func TestNewline(t *testing.T) {
-	inSet := Newline()
+	inSet := Newline
 
 	tests := map[string]struct {
 		input     string
