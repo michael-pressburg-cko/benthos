@@ -877,8 +877,6 @@ func (k *kinesisReader) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	k.sess.BaseEndpoint = aws.String("http://0.0.0.0:4566")
-	k.sess.Region = "us-east-1"
 	svc := kinesis.NewFromConfig(k.sess)
 	checkpointer, err := newAWSKinesisCheckpointer(k.sess, k.clientID, k.conf.DynamoDB, k.leasePeriod, k.commitPeriod)
 	if err != nil {
