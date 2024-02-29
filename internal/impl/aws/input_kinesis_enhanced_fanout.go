@@ -6,13 +6,76 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/cenkalti/backoff/v4"
 )
 
+type efoConsumer struct {
+	consumerName string
+}
+
+func NewEfoConsumer(consumerName string) *efoConsumer {
+	return &efoConsumer{
+		consumerName: consumerName,
+	}
+}
+
+func (k *kinesisReader) registerEfoConsumer(ctx context.Context, info streamInfo, consumerName string) (*string, error) {
+	streamOutput, err := k.svc.RegisterStreamConsumer(ctx, &kinesis.RegisterStreamConsumerInput{
+		ConsumerName: &consumerName,
+		StreamARN:    &info.arn,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if streamOutput.Consumer == nil {
+		return nil, errors.New("failed to register consumer - RegisterStreamConsumer returned nil")
+	}
+
+	return streamOutput.Consumer.ConsumerARN, nil
+}
+
 func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shardID, startingSequence string) (initErr error) {
 	//register consumer
+	consumerARN, err := k.registerEfoConsumer(k.ctx, info, k.conf.EFOConsumerName)
+	if err != nil {
+		return err
+	}
 	// busy read from consumer
+	subOutput, err := k.svc.SubscribeToShard(k.ctx, &kinesis.SubscribeToShardInput{
+		ConsumerARN: consumerARN,
+		ShardId:     &shardID,
+		StartingPosition: &types.StartingPosition{
+			Type:           types.ShardIteratorTypeAtSequenceNumber,
+			SequenceNumber: &startingSequence,
+		},
+	})
+
+	if err != nil {
+		return err
+	}
+	pendingChan := make(chan []types.Record, 10)
+
+	go func() {
+		for {
+			select {
+			case <-k.ctx.Done():
+				subOutput.GetStream().Close()
+				close(pendingChan)
+				return
+
+			case ev := <-subOutput.GetStream().Events():
+				if event, ok := ev.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent); !ok {
+					k.log.Errorf("Received unexpected event type: %T", ev)
+				} else {
+					pendingChan <- event.Value.Records
+				}
+			}
+		}
+	}()
 	// copy code from runConsumer and use a channel to pass to pending
 	defer func() {
 		if initErr != nil {
@@ -35,10 +98,6 @@ func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shar
 
 	// Stores consumed records that have yet to be added to the batcher.
 	var pending []types.Record
-	var iter string
-	if iter, initErr = k.getIter(info, shardID, startingSequence); initErr != nil {
-		return initErr
-	}
 
 	// Keeps track of the latest state of the consumer.
 	state := awsKinesisConsumerConsuming
@@ -106,37 +165,19 @@ func (k *kinesisReader) runEfoConsumer(wg *sync.WaitGroup, info streamInfo, shar
 		for {
 			var err error
 			// TODO CHANGE HERE
-			if state == awsKinesisConsumerConsuming && len(pending) == 0 && nextPullChan == unblockedChan {
-				if pending, iter, err = k.getRecords(info, shardID, iter); err != nil {
-					if !awsErrIsTimeout(err) {
-						nextPullChan = time.After(boff.NextBackOff())
+			p, ok := <-pendingChan
+			if !ok {
+				state = awsKinesisConsumerFinished
+			} else {
+				pending = p
+			}
 
-						var aerr *types.ExpiredIteratorException
-						if errors.As(err, &aerr) {
-							k.log.Warn("Shard iterator expired, attempting to refresh")
-							newIter, err := k.getIter(info, shardID, recordBatcher.GetSequence())
-							if err != nil {
-								k.log.Errorf("Failed to refresh shard iterator: %v", err)
-							} else {
-								iter = newIter
-							}
-						} else {
-							k.log.Errorf("Failed to pull Kinesis records: %v\n", err)
-						}
-					}
-				} else if len(pending) == 0 {
-					nextPullChan = time.After(boff.NextBackOff())
-				} else {
-					boff.Reset()
-					nextPullChan = blockedChan
-				}
+			if state == awsKinesisConsumerConsuming && len(pending) == 0 && nextPullChan == unblockedChan {
 				// The getRecords method ensures that it returns the input
 				// iterator whenever it errors out. Therefore, regardless of the
 				// outcome of the call if iter is now empty we have definitely
 				// reached the end of the shard.
-				if iter == "" {
-					state = awsKinesisConsumerFinished
-				}
+
 			} else {
 				unblockPullChan()
 			}
